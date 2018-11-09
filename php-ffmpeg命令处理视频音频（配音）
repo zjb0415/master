@@ -1,0 +1,150 @@
+ /*
+ * 配置在环境.env文件中
+  */
+[ffmpeg]
+upload_url=/app/data/upload
+resource_url=/app/data/resource
+ 
+ 
+ /*
+     * 微信录音
+     * @return array
+     */
+    public function luyin()
+    {
+        $wx=new WxPayDataBase();
+//        $data=Db::name('user_song_segment')
+//            ->where('id', '1540125627')
+//            ->select();
+        $media_id =  Request::instance()->get('media_id');//微信server_id
+        $song_id = Request::instance()->get('song_id');//歌曲id
+        $segment_seg_id = Request::instance()->get('seg_id');//分曲id
+        $where=['song_id'=>$song_id,'seg_id'=>$segment_seg_id];
+        $access_token = $wx->getAccessToken();
+        $upload_url=Env::get('ffmpeg.upload_url');
+        $resource_url=Env::get('ffmpeg.resource_url');
+        $path = $upload_url."/audio";   //保存路径，相对当前文件的路径
+        $video_path = $upload_url."/video";   //保存路径，相对当前文件的路径
+        (int)$user=Session::get('wx_login');
+        if(!is_dir($path)){
+            mkdir($path,0777,true);
+        }
+        if(!is_dir($video_path)){
+            mkdir($video_path,0777,true);
+        }
+        //微 信上传下载媒体文件
+        $url = 'http://file.api.weixin.qq.com/cgi-bin/media/get?access_token='.$access_token["access_token"].'&media_id='.$media_id;
+//        Db::name('user_song_segment')
+//            ->insert(['id'=>time(),'path'=>$media_id,'user_song_id'=>(int)$song_id,'song_segment_seg_id'=>(int)$segment_seg_id,'time'=>time()]);
+        $filename = "wxupload_".time().rand(1111,9999).".amr";
+        self::downAndSaveFile($url,$path."/".$filename);
+        $data["path"] = $path.$filename;
+        $data["msg"] = "download record audio success!";
+        $data["url"] = $url;
+        $data["access_token"] = $access_token;
+
+
+        $amr = $data["path"];
+        $mp3 =$user."_".$song_id."_".$segment_seg_id."_".date('ymd-his',time()).".mp3";
+
+        if(file_exists($mp3) == true){
+            // exit('无需转换');
+        }else{
+            $command0 = "ffmpeg -i ".$path."/".$filename."  ".$upload_url."/audio/$mp3";
+            exec($command0,$error);
+        }
+        unlink($path."/".$filename);//删除
+        $song_segment=Db::name('song_segment')
+            ->where($where)
+            ->select();
+        //音频合并
+        $command1="ffmpeg -i  ".$upload_url."/audio/$mp3  -i  ".$resource_url.$song_segment[0]['path_audio']." -filter_complex amix=inputs=2:duration=first:dropout_transition=2 -f mp3  -ar 44100  ".$upload_url."/audio/new_".$mp3;
+        exec($command1,$error);
+//        Db::name('user_song_segment')
+//            ->insert(['path'=>'/upload/audio/new_'.$mp3,'user_song_id'=>'3','song_segment_seg_id'=>'1','time'=>time()]);
+        //视频去音
+        $new_no_apth=$upload_url."/video/".time().'.mp4';
+        $command2="ffmpeg -i ".$resource_url.$song_segment[0]['path_no_audio']." -ar 44100 -c:v copy -an ".$new_no_apth;
+        exec($command2,$error);
+         //因safari浏览器播放视频没有声音，安卓和pc都可以正常播放，后来才知道是因为视频的背景音乐是双声道，在视频音频合成时候加上 c:a aac 合成单声道，就可以正常播放了
+        //视频音频合并
+        $videoName=$user."_".$song_id."_".$segment_seg_id."_".date('ymd-his',time()).".mp4";
+        $command3="ffmpeg -i ".$new_no_apth." -i $upload_url/audio/new_".$mp3."  -c copy -c:a aac -strict experimental ".$upload_url."/video/new_".$videoName;
+        exec($command3,$error);
+        Db::name('user_song_segment')
+            ->insert(['path'=>'/video/new_'.$videoName,'user_song_id'=>(int)$song_id,'song_segment_seg_id'=>(int)$segment_seg_id,'time'=>time()]);
+        unlink($upload_url."/audio/$mp3");//删除
+        unlink($new_no_apth);
+        return "success";
+        echo  $command1;echo "</br>";
+        echo $command0;echo "</br>";
+        echo $command2;echo "</br>";
+        echo $command3;echo "</br>";
+    }
+    /*
+     * 微信语音保存
+     * @return object
+     */
+    function downAndSaveFile($url,$savePath){
+        ob_start();
+        readfile($url);
+        $img  = ob_get_contents();
+        ob_end_clean();
+        $size = strlen($img);
+        $fp = fopen($savePath, 'a');
+        fwrite($fp, $img);
+        fclose($fp);
+    }
+    /*
+     * 获取视频播放地址
+     * @return array
+     */
+    public function videourl()
+    {
+        $song_id = Request::instance()->get('song_id');//歌曲id
+        $segment_seg_id = Request::instance()->get('seg_id');//分曲id
+        $data=Db::name('user_song_segment')
+            ->where('user_song_id', $song_id)
+            ->where('song_segment_seg_id', $segment_seg_id)
+            ->order('time desc')
+            ->limit(1)
+            ->select();
+        return $data;
+        //        return $this->fetch("Activity/luyin");
+    }
+    /*
+     * 多视频合成
+     * @return string
+     */
+    public function generatevideo()
+    {
+        $upload_url=Env::get('ffmpeg.upload_url');
+        $song_id = Request::instance()->get('song_id');
+        $seg_num=Db::name('song_segment')
+            ->where('song_id',$song_id)
+            ->count();
+        $data=Db::name('user_song_segment')
+            ->where('user_song_id',$song_id)
+            ->order('song_segment_seg_id asc')
+            ->limit($seg_num)
+            ->select();
+        (int)$user=Session::get('wx_login');
+        $n="";
+        $file="";
+        foreach ($data as $k=>$v)
+        {
+            $n.="[$k:0] [$k:1] ";
+            $file.=" -i ".$upload_url.$data[$k]['path'];
+//            $name[$k]='/var/www/html/qupeiyin_dev/public/upload/video_ts/'.$song_id.$k.time().".ts";
+//            $command[]="ffmpeg -i  /var/www/html/qupeiyin_dev/public".$data[$k]['path']." -vcodec copy -vcodec copy -vbsf h264_mp4toannexb  ".$name[$k];
+//            exec($command,$error);
+        }
+        $videoName=$user."_".$song_id."_".date('ymd-his',time()).".mp4";
+        $file_name='/video/'.$videoName;
+        $path=$upload_url.$file_name;
+        $command="ffmpeg ".$file." -filter_complex "."'$n"." concat=n=".$seg_num.":v=1:a=1 [v] [a]' -map '[v]' -map '[a]' ".$path;
+        exec($command,$error);
+        Db::name('user_song')
+            ->insert(['user_id'=>$user,'song_id'=>$song_id,'path'=>$file_name,'time'=>time()]);
+        return Db::name('user_song')->getLastInsID();
+    }
